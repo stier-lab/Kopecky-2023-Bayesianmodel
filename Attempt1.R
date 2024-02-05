@@ -75,7 +75,7 @@ sink()
 
 mod <- rstan::stan_model('round1.stan')
 
-df <- read.csv("bart_bayesian.csv")
+df <- read.csv("data/bart_bayesian.csv")
 
 df_plotscale <- df %>%
   group_by(plot, treatment, initial_live) %>%

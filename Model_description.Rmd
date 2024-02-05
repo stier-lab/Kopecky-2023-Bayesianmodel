@@ -1,0 +1,226 @@
+---
+title: "Model_description"
+output: html_document
+date: "2024-02-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Ok so picking this back up now that I have a sense of how to integrate effects across different levels of the heirarchy.
+
+Let start by describing the model. Kai has data at two hierarchical levels: the plot level and the level of the individual coral colony.
+
+```{r}
+library(tidyverse)
+df <- read.csv("data/bart_bayesian.csv")
+
+df %>% 
+  mutate(delta = august_2019_area - july_2022_area) %>% 
+  ggplot(aes(x = delta))+
+  geom_histogram()+
+  theme_classic()
+
+```
+
+```{r}
+
+df %>%
+  group_by(plot, treatment) %>%
+  summarize(total_live_2019 = sum(august_2019_area), 
+            total_live_2022 = sum(july_2022_area)) %>% 
+  pivot_longer(cols = total_live_2019:total_live_2022)
+
+df %>%
+  ggplot(aes(x = treatment, y = total_dead_overlap))+
+  geom_point()
+
+```
+
+So the variable initial_live is just the sum of total LCC in august 2019. And total_dead_overlap is a continuous variable similar to the effect of treatment (e.g. there isn't much dead coral because it was removed).
+
+Ok, so we want to model the size of coral $i$, in year, $y$, (e.g. $C_{i,y}$) as a function of coral size in the last time step ($C_{i,y-1}$), the amount of growing space available to the coral, $S$. $S = 1 - (D+L)$ where $D$ is the area occupied by dead coral and $L$ is the amount of space occupied by live corals within a certain buffered distance, $\omega$, that is externally specified.
+
+$$
+\begin{aligned}
+C_{i,y} &\sim Normal(\mu_{i,y}, \sigma^2) && \text{Likelihood function}\\
+predC_{i,y} &= predC_{i, y-1} + r_{p,i} && \text{Autoregressive process}\\
+\mu_{i,y} &\sim Normal(predC_{i,y}, \sigma_{mu_c}) && \text{Hyperprior on plot level, LCC}\\
+r_{p,i} &= r_p + \gamma_p + \beta_S S_{p,i} && \text{Linear regression on coral growth rate, r}\\
+r_p &= \alpha_{0,p} + \beta_{T = removal} T && \text{Higher order effects of treatment on plot level intercept}\\
+\end{aligned}
+$$
+
+$$
+\begin{aligned}
+C_{i,y} &\sim Normal(\mu_{i,y}, \sigma^2) && \text{Likelihood function}\\
+predC_{i,y} &= predC_{i, y-1} + r_{p,i} && \text{Autoregressive process}\\
+\mu_{i,y} &\sim Normal(predC_{i,y}, \sigma_{mu_c}) && \text{Hyperprior on plot level, LCC}\\
+r_{p,i} &= \alpha_{0} + \gamma_p + \beta_{T = removal} T + \beta_S S_{p,i} + \beta_{int} S_{p,i} T && \text{Linear regression on coral growth rate, r}\\
+
+\end{aligned}
+$$
+
+
+
+Ok, so going to change around notation here and use the MARSS style notation for a univariate state-space model. Let's let $x_t$ represent the "true state" of nature. In our case this represents the areal size of each individual coral. $y_t$ represents our observations of this true state. $w_t$ represents error in the process model and $v_t$ represents error (e.g. variance) in our observations. We will assume a simple autoregressive (ar1) function. Furthermore, we will assume that our covariates influence only the process model, not the observation model. 
+
+$$
+\begin{aligned}
+\text{Model}\\
+\\
+x_{t,p} &= \phi x_{t-1} + r_{t,p} + w_t && \text{Process model}\\
+r_{t,p} &= \alpha_{0} + \gamma_p + \beta_{T = removal} T + \beta_S S_{p,t} + \beta_{X} S_{p,t} T && \text{Covariate component of process model}\\
+y_{t,p} &= x_{t,p} + v_{t} && \text{Observation model}\\
+\end{aligned}
+$$
+We now have to translate this model into Bayesian terms. Here I'll let $\hat{y}$ represent the expected value of $y$, and $\hat{x}$ the expected value of x. 
+
+$$
+\begin{aligned}
+\text{Model}\\
+\\
+\hat{x}_{t,p} &= \phi x_{t-1} + r_{t,p} && \text{Process model}\\
+r_{t,p} &= \alpha_{0} + \gamma_p + \beta_{T = removal} T + \beta_S S_{p,t} + \beta_{X} S_{p,t} T && \text{Covariate component of process model}\\
+\\
+\text{Likelihood}\\
+\\
+x_{t,p} &\sim Normal(\hat{x}_{t,p}, w_t) && \text{Latent state with ar1 autocorrelated errors} \\
+y_{t,p} &\sim Normal(x_{t,p}, v_t) && \text{Observation model with v_t error}\\
+
+\\
+\text{Priors}\\
+\\
+\beta_X |\beta_S|\beta_T &\sim Normal(0, 10) && \text{Priors on covariate coefficients}\\
+\alpha_0 &\sim Normal(0, 10) && \text{Prior on global intercepts (Removal vs. Retention)}\\
+\gamma_p &\sim Normal(0, \sigma^2) && \text{Prior on plot-level deviations from the global intercepts}\\
+\sigma &\sim Exp(1) && \text{Prior on standard deviation of plot level effects}\\
+w_t &\sim Exp(1) && \text{Prior on process variance}\\
+v_t &\sim Exp(1) && \text{Prior on observation variance}\\
+
+\end{aligned}
+$$ 
+where $\phi$ is the autocorrelation coefficient for the ar1 errors, $r$ represents the individual-scale growth of coral genets, $x_{t,p}$ is a latent state variable representing coral genet size in plot $p$ at time point $t$, $y_{t,p}$ is the observed coral size at $p,t$, $\alpha_0$ is a global intercept, $\beta_S$ is the effect of the surrounding commmunity on individual growth, $\beta_T$ is the intercept effect of treatment (with T = 0 signifying retention), $\beta_X$ represents the change in the effect of the surrounding community on coral size between the retention (T=0) and removal (T=1) plots. Finally, $w_t$ is the process error and $v_t$ is the observation error. 
+
+
+```{r}
+sink("round1.stan")
+cat("
+    data {
+    
+    //Index variables
+    int n_plot; // Number of plots
+    int n; // length of the data frame
+    
+    //Response variable
+    real<lower = 0> y[n]; // Observations of coral size of each individual coral
+    
+    // Predictor variables
+    real<lower=0, upper=1> S[n];  // 1-overlap where the overlap includes both live and dead coral. An index of now much free space an individual coral has to grow into.
+    int T[n]; // treatment (either removal (T =1) or retention (T=0))
+    int plot[n];
+
+    }
+    
+    parameters {
+    
+    real alpha_0; // Reference level of the treatment effects (e.g. the effect of retention, when T=0)
+    real beta_S; // Slope effect of space availability on individual coral growth. Does not vary across plots or treatments.
+    real beta_T;
+    real beta_X;
+    real<lower=0> w;
+    real<lower=0> v;
+    real<lower=0> sigma;
+    vector[n_plot] gamma;
+    real x0;
+    }
+    
+    transformed parameters{
+    real r[n];
+    real x_hat[n];
+  
+    for(i in 1:n){
+        r[i] = alpha_0 + gamma[plot[i]] + beta_T*T[i] + beta_S*S[i] + beta_X*S[i]*T[i];
+    }
+    
+    x_hat[1] = x0; 
+    
+    for(i in 2:n){
+    x_hat[i] = x_hat[i-1] + r[i]; 
+    }
+    
+    
+    }
+    
+    model {
+    
+    real x[n];
+    
+    //priors
+
+    alpha_0 ~ normal(0, 10);
+    beta_T ~ normal(0, 10);
+    beta_S ~ normal(0, 10);
+    beta_X ~ normal(0, 10);
+    x0 ~ normal(0, 10);
+    
+    for(p in 1:n_plot){
+      gamma[p] ~ normal(0, sigma);
+    }
+    
+    w ~ exponential(1);
+    v ~ exponential(1);
+    
+    // likelihood
+    
+    x ~ normal(x_hat, v);
+    y ~ normal(x, w);
+
+    }",fill = TRUE)
+sink()
+
+
+
+mod <- rstan::stan_model('round1.stan')
+```
+
+
+
+```{r}
+library(tidyverse)
+df <- read.csv("data/bart_bayesian.csv") %>%
+  pivot_longer(cols = c(august_2019_area:july_2022_area)) %>%
+  rename(time = name) %>%
+  mutate(year = ifelse(time == "august_2019_area", 1, 2)) 
+
+
+stan_data = list("n"= length(df$genet),
+                 "n_plot" = length(unique(df$plot)),
+                 "y" = df$value, 
+                 "S" = df$total_dead_overlap, 
+                 "T" = ifelse(df$treatment == "Removal", 1, 0),
+                 "plot" = df$plot
+) # named list
+
+
+stanfit <- rstan::sampling(mod,
+                           data = stan_data, 
+                           chains = 3,
+                           thin = 1,
+                           iter = 2000,
+                           seed = 123123)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+

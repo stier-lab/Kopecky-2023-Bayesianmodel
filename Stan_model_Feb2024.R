@@ -1,4 +1,5 @@
-
+sink("round1.stan")
+cat("
     data {
     
     //Index variables
@@ -51,11 +52,11 @@
     
     //priors
 
-    alpha_0 ~ normal(0, 10);
-    beta_T ~ normal(0, 10);
-    beta_S ~ normal(0, 10);
-    beta_X ~ normal(0, 10);
-    x0 ~ normal(1, 0.001);
+    alpha_0 ~ normal(0, 1);
+    beta_T ~ normal(0, 1);
+    beta_S ~ normal(0, 1);
+    beta_X ~ normal(0, 1);
+    x0 ~ normal(0, 10);
     
     for(p in 1:n_plot){
       gamma[p] ~ normal(0, sigma);
@@ -69,4 +70,34 @@
     x ~ normal(x_hat, v);
     y ~ normal(x, w);
 
-    }
+    }",fill = TRUE)
+sink()
+
+
+
+mod <- rstan::stan_model('round1.stan')
+
+
+
+library(tidyverse)
+df <- read.csv("data/bart_bayesian.csv") %>%
+  pivot_longer(cols = c(august_2019_area:july_2022_area)) %>%
+  rename(time = name) %>%
+  mutate(year = ifelse(time == "august_2019_area", 1, 2)) 
+
+
+stan_data = list("n"= length(df$genet),
+                 "n_plot" = length(unique(df$plot)),
+                 "y" = df$value, 
+                 "S" = df$total_dead_overlap, 
+                 "T" = ifelse(df$treatment == "Removal", 1, 0),
+                 "plot" = df$plot
+) # named list
+
+
+stanfit <- rstan::sampling(mod,
+                           data = stan_data, 
+                           chains = 3,
+                           thin = 1,
+                           iter = 2000,
+                           seed = 123123)
